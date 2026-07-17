@@ -12,14 +12,30 @@ import streamlit as st
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import Image as RLImage
 
 st.set_page_config(page_title="Sovereign Market Monitor", page_icon="🌐", layout="wide")
 
 DEFAULT_FILE = Path(__file__).with_name("sovereign_market_monitor.xlsx")
 REGION_NAMES = {"America", "Euro Area", "Other Europe", "Asia-Pacific", "Africa"}
 PERIODS = ["5 day", "2 week", "3 month", "1 year"]
+
+# --- Shared visual identity -------------------------------------------------
+NAVY = "#17365D"
+INK = "#33404D"
+MUTED = "#7A8794"
+RULE = "#D9DEE4"
+GRID = "#EDF0F3"
+
+REGION_COLORS = {
+    "America": "#17365D",
+    "Euro Area": "#2E75B6",
+    "Other Europe": "#8FB8DE",
+    "Asia-Pacific": "#C55A11",
+    "Africa": "#548235",
+    "Other": "#7F7F7F",
+}
 
 COLUMN_MAP = {
     0: "Country",
@@ -123,6 +139,7 @@ def fmt(value: float, unit: str = "", decimals: int = 1) -> str:
     return f"{sign}{value:,.{decimals}f}{suffix}"
 
 
+# --- Charts -----------------------------------------------------------------
 def chart_ranked(df: pd.DataFrame, metric: str, period: str, top_n: int) -> go.Figure:
     col = METRIC_INFO[metric]["columns"][period]
     plot_df = df[["Country", "Region", col]].dropna().copy()
@@ -133,12 +150,33 @@ def chart_ranked(df: pd.DataFrame, metric: str, period: str, top_n: int) -> go.F
         x=col,
         y="Country",
         color="Region",
+        color_discrete_map=REGION_COLORS,
         orientation="h",
         labels={col: f"Change ({METRIC_INFO[metric]['unit']})", "Country": ""},
         title=f"Largest {metric} moves — {period}",
         hover_data={"Region": True, col: ":.2f"},
     )
-    fig.add_vline(x=0, line_width=1, line_color="gray")
+    fig.add_vline(x=0, line_width=1, line_color=MUTED)
+    fig.update_layout(height=max(430, 31 * len(plot_df)), legend_title_text="Region", margin=dict(l=10, r=10, t=60, b=10))
+    return fig
+
+
+def chart_risk(df: pd.DataFrame, period: str, top_n: int) -> go.Figure:
+    plot_df = df.assign(**{"Risk Score": risk_score(df, period)}).dropna(subset=["Risk Score"])
+    plot_df = plot_df.nlargest(top_n, "Risk Score").sort_values("Risk Score")
+    fig = px.bar(
+        plot_df,
+        x="Risk Score",
+        y="Country",
+        color="Region",
+        color_discrete_map=REGION_COLORS,
+        orientation="h",
+        range_x=[0, 100],
+        labels={"Risk Score": "Composite risk score (0 = calmest, 100 = most stressed)", "Country": ""},
+        title=f"Composite market-risk ranking — {period}",
+        hover_data={"Region": True, "Risk Score": ":.0f"},
+    )
+    fig.add_vline(x=50, line_width=1, line_dash="dot", line_color=MUTED)
     fig.update_layout(height=max(430, 31 * len(plot_df)), legend_title_text="Region", margin=dict(l=10, r=10, t=60, b=10))
     return fig
 
@@ -146,20 +184,59 @@ def chart_ranked(df: pd.DataFrame, metric: str, period: str, top_n: int) -> go.F
 def chart_scatter(df: pd.DataFrame, period: str) -> go.Figure:
     x_col = f"CDS {period}"
     y_col = f"Equity {period}"
-    plot_df = df.dropna(subset=[x_col, y_col]).copy()
+    plot_df = df.dropna(subset=[x_col, y_col, "CDS Now"]).copy()
     fig = px.scatter(
         plot_df,
         x=x_col,
         y=y_col,
         color="Region",
+        color_discrete_map=REGION_COLORS,
         size="CDS Now",
+        size_max=26,
         hover_name="Country",
         labels={x_col: "CDS change (bps)", y_col: "Equity return (%)", "CDS Now": "CDS now"},
         title=f"Credit versus equity performance — {period}",
     )
-    fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="gray")
-    fig.add_vline(x=0, line_width=1, line_dash="dot", line_color="gray")
-    fig.update_layout(height=520, margin=dict(l=10, r=10, t=60, b=10))
+    fig.add_hline(y=0, line_width=1, line_dash="dot", line_color=MUTED)
+    fig.add_vline(x=0, line_width=1, line_dash="dot", line_color=MUTED)
+    fig.update_layout(height=520, legend_title_text="Region", margin=dict(l=10, r=10, t=60, b=10))
+    return fig
+
+
+def chart_heatmap(df: pd.DataFrame, metric: str, period: str, max_rows: int | None = None,
+                  annotate: bool | None = None) -> go.Figure:
+    if metric == "Risk Score":
+        heat = (
+            df.assign(**{"Risk Score": risk_score(df, period)})[["Country", "Risk Score"]]
+            .dropna()
+            .set_index("Country")
+            .sort_values("Risk Score", ascending=False)
+        )
+        zmid = 50
+        title = f"Composite risk score — {period}"
+    else:
+        columns = [METRIC_INFO[metric]["columns"][p] for p in PERIODS]
+        heat = df.set_index("Country")[columns]
+        heat.columns = PERIODS
+        heat = heat.loc[heat.abs().max(axis=1).sort_values(ascending=False).index]
+        zmid = 0
+        title = f"{metric} changes across periods ({METRIC_INFO[metric]['unit']})"
+
+    if max_rows is not None:
+        heat = heat.head(max_rows)
+    if annotate is None:
+        annotate = len(heat) <= 26
+
+    fig = px.imshow(
+        heat,
+        aspect="auto",
+        color_continuous_scale="RdYlGn_r",
+        color_continuous_midpoint=zmid,
+        text_auto=".1f" if annotate else False,
+        title=title,
+    )
+    fig.update_layout(height=max(520, 25 * len(heat)), margin=dict(l=10, r=10, t=60, b=10))
+    fig.update_coloraxes(colorbar_title_text="")
     return fig
 
 
@@ -192,65 +269,107 @@ def generate_summary(df: pd.DataFrame, period: str) -> list[str]:
     return statements
 
 
-def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str]) -> bytes:
+# --- PDF: visualizations only ----------------------------------------------
+PAGE_SIZE = landscape(letter)
+MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 32, 30, 40
+PDF_MAX_ROWS = 26  # keep one chart legible on a single landscape page
+
+
+def _prepare_for_print(fig: go.Figure, width: int, height: int) -> go.Figure:
+    """Copy a screen figure and restyle it for a fixed-size printed panel."""
+    f = go.Figure(fig)
+    is_heat = bool(f.data) and isinstance(f.data[0], go.Heatmap)
+    f.update_layout(
+        title=None,
+        template="plotly_white",
+        width=width,
+        height=height,
+        font=dict(family="Helvetica, Arial, sans-serif", size=10.5, color=INK),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        showlegend=not is_heat,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1.0,
+            title_text="", font=dict(size=9.5), bgcolor="rgba(0,0,0,0)",
+        ),
+        margin=dict(l=8, r=76 if is_heat else 8, t=10 if is_heat else 30, b=34),
+        coloraxis_colorbar=dict(thickness=10, len=0.65, outlinewidth=0, tickfont=dict(size=9)),
+    )
+    f.update_xaxes(automargin=True, gridcolor=GRID, zeroline=False, linecolor=RULE,
+                   ticks="outside", tickcolor=RULE, ticklen=4, title_font=dict(size=10))
+    f.update_yaxes(automargin=True, gridcolor=GRID, zeroline=False, linecolor=RULE,
+                   title_font=dict(size=10))
+    return f
+
+
+def _fig_to_png(fig: go.Figure, width: int, height: int, scale: int = 2) -> bytes:
+    return _prepare_for_print(fig, width, height).to_image(
+        format="png", width=width, height=height, scale=scale
+    )
+
+
+def _footer(canvas, doc):
+    canvas.saveState()
+    page_w, _ = PAGE_SIZE
+    canvas.setStrokeColor(colors.HexColor(RULE))
+    canvas.setLineWidth(0.5)
+    canvas.line(MARGIN_X, 28, page_w - MARGIN_X, 28)
+    canvas.setFont("Helvetica", 7.5)
+    canvas.setFillColor(colors.HexColor(MUTED))
+    canvas.drawString(MARGIN_X, 17, doc.footer_note)
+    canvas.drawRightString(page_w - MARGIN_X, 17, str(canvas.getPageNumber()))
+    canvas.restoreState()
+
+
+def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top_n: int) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=landscape(letter),
-        rightMargin=28,
-        leftMargin=28,
-        topMargin=28,
-        bottomMargin=28,
-        title="Sovereign Market Monitor Report",
+        pagesize=PAGE_SIZE,
+        leftMargin=MARGIN_X,
+        rightMargin=MARGIN_X,
+        topMargin=MARGIN_TOP,
+        bottomMargin=MARGIN_BOTTOM,
+        title="Sovereign Market Monitor — Chart Pack",
     )
+    doc.footer_note = f"Sovereign Market Monitor  ·  {period}  ·  {', '.join(selected_regions)}"
+
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=8.5, leading=11))
-    story = [
-        Paragraph("Sovereign Market Monitor", styles["Title"]),
-        Paragraph(f"Market snapshot | Selected period: {period} | Regions: {', '.join(selected_regions)}", styles["Small"]),
-        Spacer(1, 10),
-        Paragraph("Executive summary", styles["Heading2"]),
+    title_style = ParagraphStyle(
+        name="ChartTitle", parent=styles["BodyText"], fontName="Helvetica-Bold",
+        fontSize=13, leading=15, textColor=colors.HexColor(NAVY), spaceAfter=0,
+    )
+
+    header_h = 15 + 8  # title line + breathing room
+    panel_w = int(doc.width)
+    panel_h = int(doc.height - header_h)
+
+    figures = [
+        chart_risk(df, period, min(top_n, PDF_MAX_ROWS)),
+        chart_scatter(df, period),
+        chart_ranked(df, "CDS", period, min(top_n, PDF_MAX_ROWS)),
+        chart_ranked(df, "Equity", period, min(top_n, PDF_MAX_ROWS)),
+        chart_ranked(df, "FX", period, min(top_n, PDF_MAX_ROWS)),
+        chart_heatmap(df, "CDS", period, max_rows=PDF_MAX_ROWS),
+        chart_heatmap(df, "Equity", period, max_rows=PDF_MAX_ROWS),
+        chart_heatmap(df, "FX", period, max_rows=PDF_MAX_ROWS),
     ]
-    for sentence in generate_summary(df, period):
-        story.extend([Paragraph(f"• {sentence}", styles["Small"]), Spacer(1, 4)])
 
-    story.extend([Spacer(1, 8), Paragraph("Market indicators", styles["Heading2"])])
-    cols = ["Country", "Region", "CDS Now", f"CDS {period}", f"Equity {period}", f"FX {period}"]
-    report = df[cols].copy()
-    report["Risk Score"] = risk_score(df, period)
-    report = report.sort_values("Risk Score", ascending=False)
+    story = []
+    for i, fig in enumerate(figures):
+        heading = (fig.layout.title.text or "").strip()
+        png = _fig_to_png(fig, panel_w, panel_h)
+        story.append(Paragraph(heading, title_style))
+        story.append(Spacer(1, 8))
+        story.append(RLImage(io.BytesIO(png), width=panel_w, height=panel_h))
+        if i < len(figures) - 1:
+            story.append(PageBreak())
 
-    headers = ["Country", "Region", "CDS now", f"CDS {period}", f"Equity {period}", f"FX {period}", "Risk score"]
-    table_data = [headers]
-    for _, r in report.iterrows():
-        table_data.append([
-            r["Country"], r["Region"],
-            "" if pd.isna(r["CDS Now"]) else f"{r['CDS Now']:.1f}",
-            "" if pd.isna(r[f"CDS {period}"]) else f"{r[f'CDS {period}']:+.1f}",
-            "" if pd.isna(r[f"Equity {period}"]) else f"{r[f'Equity {period}']:+.1f}%",
-            "" if pd.isna(r[f"FX {period}"]) else f"{r[f'FX {period}']:+.1f}%",
-            "" if pd.isna(r["Risk Score"]) else f"{r['Risk Score']:.0f}",
-        ])
-    table = Table(table_data, repeatRows=1, colWidths=[1.3*inch, 1.1*inch, .8*inch, .9*inch, .95*inch, .85*inch, .8*inch])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17365D")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 7.5),
-        ("GRID", (0,0), (-1,-1), .25, colors.lightgrey),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F4F6F8")]),
-        ("ALIGN", (2,1), (-1,-1), "RIGHT"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ]))
-    story.append(table)
-    story.extend([
-        Spacer(1, 8),
-        Paragraph("Interpretation note: A higher composite score indicates relatively greater market stress within the selected peer group. It is a screening indicator, not a probability of default or formal credit rating.", styles["Small"]),
-    ])
-    doc.build(story)
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buffer.getvalue()
 
 
+# --- App --------------------------------------------------------------------
 st.title("🌐 Sovereign Market Monitor")
 st.caption("Interactive monitoring of sovereign CDS, local equity markets, and foreign-exchange movements.")
 
@@ -306,20 +425,7 @@ with charts_tab:
 
 with heatmap_tab:
     heat_metric = st.selectbox("Heatmap metric", ["CDS", "Equity", "FX", "Risk Score"])
-    if heat_metric == "Risk Score":
-        heat = filtered[["Country", "Risk Score"]].set_index("Country").sort_values("Risk Score", ascending=False)
-        zmid = 50
-        title = f"Composite risk score — {period}"
-    else:
-        columns = [METRIC_INFO[heat_metric]["columns"][p] for p in PERIODS]
-        heat = filtered.set_index("Country")[columns]
-        heat.columns = PERIODS
-        heat = heat.loc[heat.abs().max(axis=1).sort_values(ascending=False).index]
-        zmid = 0
-        title = f"{heat_metric} changes across periods"
-    fig = px.imshow(heat, aspect="auto", color_continuous_scale="RdYlGn_r", color_continuous_midpoint=zmid, text_auto=".1f", title=title)
-    fig.update_layout(height=max(520, 25 * len(heat)), margin=dict(l=10, r=10, t=60, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(chart_heatmap(filtered, heat_metric, period), use_container_width=True)
 
 with data_tab:
     display_cols = ["Country", "Region", "Rating", "CDS Now", cds_col, eq_col, fx_col, "Risk Score"]
@@ -335,10 +441,26 @@ with data_tab:
     st.download_button("Download filtered data (CSV)", csv, "sovereign_market_snapshot.csv", "text/csv")
 
 with report_tab:
-    st.subheader("Downloadable monitoring report")
-    st.write("The report includes the executive summary, selected-period indicators, and composite risk ranking for the current filters.")
-    pdf_bytes = make_pdf(filtered, period, selected_regions)
-    st.download_button("Download PDF report", pdf_bytes, "sovereign_market_report.pdf", "application/pdf", type="primary")
+    st.subheader("Downloadable chart pack")
+    st.write(
+        "A print-ready PDF of the visualizations only — one full-width chart per landscape page, "
+        "using the current filters."
+    )
+    if st.button("Build PDF", type="primary"):
+        with st.spinner("Rendering charts…"):
+            try:
+                st.session_state["pdf_bytes"] = make_pdf(filtered, period, selected_regions, top_n)
+            except Exception as exc:
+                st.session_state.pop("pdf_bytes", None)
+                st.error(
+                    f"Could not render the charts to PDF: {exc}\n\n"
+                    "Static image export needs the `kaleido` package — install it with `pip install kaleido`."
+                )
+    if st.session_state.get("pdf_bytes"):
+        st.download_button(
+            "Download PDF", st.session_state["pdf_bytes"],
+            "sovereign_market_charts.pdf", "application/pdf",
+        )
     with st.expander("Methodology and interpretation"):
         st.markdown("""
         **CDS:** Higher spreads or positive spread changes normally signal increased perceived sovereign credit risk.  
