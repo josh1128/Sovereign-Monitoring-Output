@@ -294,6 +294,90 @@ def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value
     c.drawString(ax + arrow_w + arrow_gap + num_w + num_unit_gap, baseline, unit_str)
 
 
+def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, value_color, up):
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    c.setFillColor(colors.HexColor("#EAEDF1"))
+    c.roundRect(x + 1.5, y - 2, w, h, 9, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setStrokeColor(colors.HexColor("#EDEFF2"))
+    c.setLineWidth(0.75)
+    c.roundRect(x, y, w, h, 9, stroke=1, fill=1)
+
+    # label (top), country (left) and value (right) share one compact band
+    c.setFillColor(colors.HexColor(MUTED))
+    c.setFont("Helvetica", 7.5)
+    c.drawString(x + 12, y + h - 15, label.upper())
+
+    code = _ISO.get(country, (country[:2] or "?").upper())
+    badge_r = 7
+    badge_cx = x + 12 + badge_r
+    badge_cy = y + 16
+    c.setFillColor(colors.HexColor(REGION_COLORS.get(region, "#7F7F7F")))
+    c.circle(badge_cx, badge_cy, badge_r, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 6)
+    c.drawCentredString(badge_cx, badge_cy - 2, code)
+    c.setFillColor(colors.HexColor(INK))
+    c.setFont("Helvetica-Bold", 10.5)
+    c.drawString(badge_cx + badge_r + 5, badge_cy - 4, country)
+
+    # value on the right, auto-fit
+    inner = w - 24
+    arrow_w, arrow_gap, num_unit_gap = 9, 5, 2
+    num_size, unit_size = 22, 11
+    while True:
+        num_w = stringWidth(num_str, "Helvetica-Bold", num_size)
+        unit_w = stringWidth(unit_str, "Helvetica-Bold", unit_size)
+        group_w = arrow_w + arrow_gap + num_w + num_unit_gap + unit_w
+        if group_w <= inner or num_size <= 13:
+            break
+        num_size -= 1
+        unit_size = max(9, int(num_size * 0.5))
+    baseline = badge_cy - 8
+    ax = x + w - 12 - group_w
+    _draw_arrow(c, ax + arrow_w / 2, baseline + num_size * 0.7, up, value_color, w=9, h=11)
+    c.setFillColor(colors.HexColor(value_color))
+    c.setFont("Helvetica-Bold", num_size)
+    c.drawString(ax + arrow_w + arrow_gap, baseline, num_str)
+    c.setFont("Helvetica-Bold", unit_size)
+    c.drawString(ax + arrow_w + arrow_gap + num_w + num_unit_gap, baseline, unit_str)
+
+
+def _build_cards(df: pd.DataFrame, per: str) -> list[dict]:
+    cds_col, eq_col = f"CDS {per}", f"Equity {per}"
+    cds = df[["Country", "Region", cds_col]].dropna()
+    eq = df[["Country", "Region", eq_col]].dropna()
+    cards = []
+    if not cds.empty:
+        w = cds.loc[cds[cds_col].idxmax()]
+        t = cds.loc[cds[cds_col].idxmin()]
+        cards.append(dict(label="Largest CDS Widening", country=w["Country"], region=w["Region"],
+                          num_str=f"{w[cds_col]:+.1f}", unit_str="bps", value_color=POS, up=True))
+        cards.append(dict(label="Largest CDS Tightening", country=t["Country"], region=t["Region"],
+                          num_str=f"{t[cds_col]:+.1f}", unit_str="bps", value_color=NEG, up=False))
+    if not eq.empty:
+        s = eq.loc[eq[eq_col].idxmax()]
+        k = eq.loc[eq[eq_col].idxmin()]
+        cards.append(dict(label="Strongest Equity Market", country=s["Country"], region=s["Region"],
+                          num_str=f"{s[eq_col]:+.1f}", unit_str="%", value_color=NEG, up=True))
+        cards.append(dict(label="Weakest Equity Market", country=k["Country"], region=k["Region"],
+                          num_str=f"{k[eq_col]:+.1f}", unit_str="%", value_color=POS, up=False))
+    return cards
+
+
+def _draw_card_row(c, cards, W, mx, row_top, card_h, suffix, *, mini=False):
+    n = len(cards)
+    if not n:
+        return
+    gap = 18
+    card_w = (W - 2 * mx - (n - 1) * gap) / n
+    drawer = _kpi_card_mini if mini else _kpi_card
+    for i, cd in enumerate(cards):
+        cd2 = dict(cd)
+        cd2["label"] = f"{cd['label']}  ·  {suffix}"
+        drawer(c, mx + i * (card_w + gap), row_top - card_h, card_w, card_h, **cd2)
+
+
 def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str,
                       custom_takeaways: list[str] | None = None) -> bytes:
     from reportlab.pdfgen import canvas
@@ -310,38 +394,25 @@ def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str,
     c.setFont("Helvetica", 13)
     c.drawString(mx, H - 84, "Largest market movements across sovereign credit and equity markets.")
 
-    cds_col, eq_col = f"CDS {period}", f"Equity {period}"
-    cds = df[["Country", "Region", cds_col]].dropna()
-    eq = df[["Country", "Region", eq_col]].dropna()
+    show_5day = period != "5 day"
+    sel_cards = _build_cards(df, period)
 
-    cards = []
-    if not cds.empty:
-        w = cds.loc[cds[cds_col].idxmax()]
-        t = cds.loc[cds[cds_col].idxmin()]
-        cards.append(dict(label="Largest CDS Widening", country=w["Country"], region=w["Region"],
-                          num_str=f"{w[cds_col]:+.1f}", unit_str="bps", value_color=POS, up=True))
-        cards.append(dict(label="Largest CDS Tightening", country=t["Country"], region=t["Region"],
-                          num_str=f"{t[cds_col]:+.1f}", unit_str="bps", value_color=NEG, up=False))
-    if not eq.empty:
-        s = eq.loc[eq[eq_col].idxmax()]
-        k = eq.loc[eq[eq_col].idxmin()]
-        cards.append(dict(label="Strongest Equity Market", country=s["Country"], region=s["Region"],
-                          num_str=f"{s[eq_col]:+.1f}", unit_str="%", value_color=NEG, up=True))
-        cards.append(dict(label="Weakest Equity Market", country=k["Country"], region=k["Region"],
-                          num_str=f"{k[eq_col]:+.1f}", unit_str="%", value_color=POS, up=False))
-
-    # KPI row
-    n = len(cards)
-    if n:
-        gap = 18
-        card_w = (W - 2 * mx - (n - 1) * gap) / n
-        card_h = 150
-        row_top = H - 118
-        for i, cd in enumerate(cards):
-            _kpi_card(c, mx + i * (card_w + gap), row_top - card_h, card_w, card_h, **cd)
+    if show_5day:
+        # primary row (selected period) + compact 5-day row
+        primary_top = H - 106
+        card_h1 = 122
+        _draw_card_row(c, sel_cards, W, mx, primary_top, card_h1, period)
+        mini_top = primary_top - card_h1 - 14
+        card_h2 = 62
+        _draw_card_row(c, _build_cards(df, "5 day"), W, mx, mini_top, card_h2, "5 day", mini=True)
+        sep_y = mini_top - card_h2 - 20
+    else:
+        primary_top = H - 118
+        card_h1 = 150
+        _draw_card_row(c, sel_cards, W, mx, primary_top, card_h1, period)
+        sep_y = H - 320
 
     # separator
-    sep_y = H - 320
     c.setStrokeColor(colors.HexColor(RULE))
     c.setLineWidth(0.75)
     c.line(mx, sep_y, W - mx, sep_y)
@@ -527,13 +598,20 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
     panel_w = int(doc.width * SHRINK)
     panel_h = int((doc.height - TITLE_H - TITLE_GAP) * SHRINK)
 
-    figures = [
-        chart_scatter(df, period, label_top=6),
-        chart_ranked(df, "CDS", period, min(top_n, PDF_MAX_ROWS)),
-        chart_ranked(df, "Equity", period, min(top_n, PDF_MAX_ROWS)),
-        chart_heatmap(df, "CDS", period, max_rows=PDF_MAX_ROWS),
-        chart_heatmap(df, "Equity", period, max_rows=PDF_MAX_ROWS),
-    ]
+    cap = min(top_n, PDF_MAX_ROWS)
+    add_5day = period != "5 day"
+
+    figures = [chart_scatter(df, period, label_top=6)]
+    if add_5day:
+        figures.append(chart_scatter(df, "5 day", label_top=6))
+    figures.append(chart_ranked(df, "CDS", period, cap))
+    if add_5day:
+        figures.append(chart_ranked(df, "CDS", "5 day", cap))
+    figures.append(chart_ranked(df, "Equity", period, cap))
+    if add_5day:
+        figures.append(chart_ranked(df, "Equity", "5 day", cap))
+    figures.append(chart_heatmap(df, "CDS", period, max_rows=PDF_MAX_ROWS))
+    figures.append(chart_heatmap(df, "Equity", period, max_rows=PDF_MAX_ROWS))
 
     story = []
     for i, fig in enumerate(figures):
