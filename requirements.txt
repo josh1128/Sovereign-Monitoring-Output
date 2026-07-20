@@ -6,3 +6,4 @@ plotly>=5.24
 reportlab>=4.2
 matplotlib
 kaleido==0.2.1
+pypdf
