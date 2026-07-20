@@ -28,14 +28,16 @@ MUTED = "#7A8794"
 RULE = "#D9DEE4"
 GRID = "#EDF0F3"
 
-REGION_COLORS = {
-    "America": "#17365D",
-    "Euro Area": "#2E75B6",
-    "Other Europe": "#8FB8DE",
-    "Asia/Pacific": "#C55A11",
-    "Africa": "#548235",
-    "Other": "#7F7F7F",
+REGION_ALIASES = {
+    "America": "America",
+    "Euro Area": "Euro Area",
+    "Other Europe": "Other Europe",
+    "Asia/Pacific": "Asia-Pacific",
+    "Asia-Pacific": "Asia-Pacific",
+    "Africa": "Africa",
 }
+
+REGION_NAMES = set(REGION_ALIASES)
 
 COLUMN_MAP = {
     0: "Country",
