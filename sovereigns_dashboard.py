@@ -18,7 +18,17 @@ from reportlab.platypus import Image as RLImage
 st.set_page_config(page_title="Sovereign Market Monitor", page_icon="🌐", layout="wide")
 
 DEFAULT_FILE = Path(__file__).with_name("sovereign_market_monitor.xlsx")
-REGION_NAMES = {"America", "Euro Area", "Other Europe", "Asia/Pacific", "Africa"}
+REGION_ALIASES = {
+    "America": "America",
+    "Euro Area": "Euro Area",
+    "Other Europe": "Other Europe",
+    "Asia/Pacific": "Asia-Pacific",
+    "Asia-Pacific": "Asia-Pacific",
+    "Asia Pacific": "Asia-Pacific",
+    "Africa": "Africa",
+}
+
+REGION_NAMES = set(REGION_ALIASES)
 PERIODS = ["5 day", "2 week", "3 month", "1 year"]
 
 # --- Shared visual identity -------------------------------------------------
@@ -28,16 +38,14 @@ MUTED = "#7A8794"
 RULE = "#D9DEE4"
 GRID = "#EDF0F3"
 
-REGION_ALIASES = {
-    "America": "America",
-    "Euro Area": "Euro Area",
-    "Other Europe": "Other Europe",
-    "Asia/Pacific": "Asia-Pacific",
-    "Asia-Pacific": "Asia-Pacific",
-    "Africa": "Africa",
+REGION_COLORS = {
+    "America": "#17365D",
+    "Euro Area": "#2E75B6",
+    "Other Europe": "#8FB8DE",
+    "Asia-Pacific": "#C55A11",
+    "Africa": "#548235",
+    "Other": "#7F7F7F",
 }
-
-REGION_NAMES = set(REGION_ALIASES)
 
 COLUMN_MAP = {
     0: "Country",
