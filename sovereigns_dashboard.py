@@ -207,6 +207,11 @@ def _exec_takeaways(df: pd.DataFrame, period: str) -> list[str]:
     return out[:3]
 
 
+def generate_key_takeaways_preview(df: pd.DataFrame, period: str) -> list[str]:
+    """Public helper so the app can pre-fill the editable takeaways box."""
+    return _exec_takeaways(df, period)
+
+
 # ISO codes for the badge tokens; falls back to the first two letters.
 _ISO = {
     "South Africa": "ZA", "South Korea": "KR", "United States": "US", "United Kingdom": "GB",
@@ -289,7 +294,8 @@ def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value
     c.drawString(ax + arrow_w + arrow_gap + num_w + num_unit_gap, baseline, unit_str)
 
 
-def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str) -> bytes:
+def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str,
+                      custom_takeaways: list[str] | None = None) -> bytes:
     from reportlab.pdfgen import canvas
     buf = io.BytesIO()
     W, H = PAGE_SIZE
@@ -342,16 +348,44 @@ def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str) -> bytes:
 
     # key takeaways
     c.setFillColor(colors.HexColor(NAVY))
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(mx, sep_y - 34, "Key Takeaways")
-    ty = sep_y - 66
-    for line in _exec_takeaways(df, period):
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(mx, sep_y - 32, "Key Takeaways")
+
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    take_size = 12
+    take_font = "Helvetica"
+    text_left = mx + 15
+    max_w = W - mx - text_left
+
+    def _wrap(text: str) -> list[str]:
+        words, lines, cur = text.split(), [], ""
+        for word in words:
+            trial = f"{cur} {word}".strip()
+            if stringWidth(trial, take_font, take_size) <= max_w:
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        return lines
+
+    takeaways = [t.strip() for t in (custom_takeaways or []) if t and t.strip()]
+    if not takeaways:
+        takeaways = _exec_takeaways(df, period)
+
+    ty = sep_y - 60
+    for line in takeaways:
+        wrapped = _wrap(line)
         c.setFillColor(colors.HexColor(NAVY))
-        c.circle(mx + 4, ty + 5, 2.5, stroke=0, fill=1)
+        c.circle(mx + 4, ty + 4, 2.3, stroke=0, fill=1)
         c.setFillColor(colors.HexColor(INK))
-        c.setFont("Helvetica", 15.5)
-        c.drawString(mx + 16, ty, line)
-        ty -= 30
+        c.setFont(take_font, take_size)
+        for seg in wrapped:
+            c.drawString(text_left, ty, seg)
+            ty -= take_size + 4
+        ty -= 8  # gap between bullets
 
     # footer
     c.setStrokeColor(colors.HexColor(RULE)); c.setLineWidth(0.5)
@@ -467,7 +501,8 @@ def _footer(canvas, doc):
     canvas.restoreState()
 
 
-def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top_n: int) -> bytes:
+def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top_n: int,
+             custom_takeaways: list[str] | None = None) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -518,7 +553,7 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
 
     # Prepend the natively-drawn executive summary page.
     from pypdf import PdfReader, PdfWriter
-    exec_pdf = _exec_summary_pdf(df, period, doc.footer_note)
+    exec_pdf = _exec_summary_pdf(df, period, doc.footer_note, custom_takeaways=custom_takeaways)
     writer = PdfWriter()
     for page in PdfReader(io.BytesIO(exec_pdf)).pages:
         writer.add_page(page)
@@ -601,10 +636,26 @@ with report_tab:
         "A print-ready PDF of the visualizations only — one full-width chart per landscape page, "
         "using the current filters."
     )
+
+    use_custom = st.checkbox("Write my own Key Takeaways", value=False)
+    custom_takeaways = None
+    if use_custom:
+        auto_preview = "\n".join(generate_key_takeaways_preview(filtered, period))
+        raw = st.text_area(
+            "One takeaway per line — these replace the auto-generated ones on the summary page.",
+            value=auto_preview,
+            height=140,
+            help="Leave a line blank to skip it. Long lines wrap automatically.",
+        )
+        custom_takeaways = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        st.caption(f"{len(custom_takeaways)} takeaway(s) will be used.")
+
     if st.button("Build PDF", type="primary"):
         with st.spinner("Rendering charts…"):
             try:
-                st.session_state["pdf_bytes"] = make_pdf(filtered, period, selected_regions, top_n)
+                st.session_state["pdf_bytes"] = make_pdf(
+                    filtered, period, selected_regions, top_n, custom_takeaways=custom_takeaways
+                )
             except Exception as exc:
                 st.session_state.pop("pdf_bytes", None)
                 st.error(
