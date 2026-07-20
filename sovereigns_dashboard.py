@@ -178,37 +178,190 @@ def chart_scatter(df: pd.DataFrame, period: str, label_top: int = 0) -> go.Figur
     return fig
 
 
-def chart_summary(df: pd.DataFrame, period: str) -> go.Figure:
-    """Visualization-only executive summary: the week's headline movers."""
-    cds_col = f"CDS {period}"
-    eq_col = f"Equity {period}"
-    fig = go.Figure()
-    if df[cds_col].notna().any():
-        r = df.loc[df[cds_col].idxmax()]
-        fig.add_trace(go.Indicator(
-            mode="number",
-            value=float(r[cds_col]),
-            number={"suffix": " bps", "valueformat": "+.1f", "font": {"size": 60, "color": NAVY}},
-            title={"text": f"Largest CDS widening<br><span style='font-size:26px;color:{INK}'>{r['Country']}</span>",
-                   "font": {"size": 17, "color": MUTED}},
-            domain={"row": 0, "column": 0},
-        ))
-    if df[eq_col].notna().any():
-        r = df.loc[df[eq_col].idxmin()]
-        fig.add_trace(go.Indicator(
-            mode="number",
-            value=float(r[eq_col]),
-            number={"suffix": " %", "valueformat": "+.1f", "font": {"size": 60, "color": "#B23A2E"}},
-            title={"text": f"Weakest equity market<br><span style='font-size:26px;color:{INK}'>{r['Country']}</span>",
-                   "font": {"size": 17, "color": MUTED}},
-            domain={"row": 0, "column": 1},
-        ))
-    fig.update_layout(
-        grid={"rows": 1, "columns": 2, "pattern": "independent"},
-        title=f"Executive summary — {period}",
-        height=520,
-    )
-    return fig
+def _exec_takeaways(df: pd.DataFrame, period: str) -> list[str]:
+    """Three one-line, data-driven takeaways for the summary page."""
+    cds_col, eq_col = f"CDS {period}", f"Equity {period}"
+    cds = df[["Country", cds_col]].dropna()
+    eq = df[["Country", eq_col]].dropna()
+    out: list[str] = []
+
+    if not cds.empty:
+        lo, hi = cds[cds_col].min(), cds[cds_col].max()
+        widen = cds.loc[cds[cds_col].idxmax()]
+        out.append(
+            f"Sovereign CDS moves stayed within a narrow band ({lo:+.1f} to {hi:+.1f} bps), "
+            "pointing to broadly stable credit risk."
+        )
+        out.append(
+            f"{widen['Country']} saw the largest deterioration in sovereign credit risk, "
+            f"with CDS widening {widen[cds_col]:+.1f} bps."
+        )
+    if not eq.empty:
+        strong = eq.loc[eq[eq_col].idxmax()]
+        weak = eq.loc[eq[eq_col].idxmin()]
+        louder = "Equity markets were more volatile than CDS" if (not cds.empty and eq[eq_col].std() > cds[cds_col].std()) else "Equity markets diverged sharply"
+        out.append(
+            f"{louder}, led by strength in {strong['Country']} ({strong[eq_col]:+.1f}%) "
+            f"and weakness in {weak['Country']} ({weak[eq_col]:+.1f}%)."
+        )
+    return out[:3]
+
+
+# ISO codes for the badge tokens; falls back to the first two letters.
+_ISO = {
+    "South Africa": "ZA", "South Korea": "KR", "United States": "US", "United Kingdom": "GB",
+    "Hong Kong": "HK", "Czech Republic": "CZ", "Saudi Arabia": "SA", "New Zealand": "NZ",
+    "Japan": "JP", "China": "CN", "India": "IN", "Brazil": "BR", "Mexico": "MX", "Ukraine": "UA",
+    "Russia": "RU", "Thailand": "TH", "Taiwan": "TW", "Malaysia": "MY", "Singapore": "SG",
+    "France": "FR", "Germany": "DE", "Italy": "IT", "Spain": "ES", "Portugal": "PT", "Ireland": "IE",
+    "Belgium": "BE", "Netherlands": "NL", "Austria": "AT", "Finland": "FI", "Slovenia": "SI",
+    "Luxembourg": "LU", "Poland": "PL", "Norway": "NO", "Sweden": "SE", "Denmark": "DK",
+    "Switzerland": "CH", "Canada": "CA", "Australia": "AU",
+}
+
+POS = "#C0392B"  # deterioration / risk-up  (red)
+NEG = "#2E7D32"  # improvement / risk-down  (green)
+
+
+def _draw_arrow(c, cx, top_y, up: bool, color: str, w: float = 15, h: float = 18):
+    c.setFillColor(colors.HexColor(color))
+    c.setStrokeColor(colors.HexColor(color))
+    p = c.beginPath()
+    if up:
+        p.moveTo(cx, top_y); p.lineTo(cx - w / 2, top_y - h); p.lineTo(cx + w / 2, top_y - h)
+    else:
+        p.moveTo(cx, top_y - h); p.lineTo(cx - w / 2, top_y); p.lineTo(cx + w / 2, top_y)
+    p.close()
+    c.drawPath(p, fill=1, stroke=0)
+
+
+def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value_color, up):
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    # subtle shadow then white rounded card
+    c.setFillColor(colors.HexColor("#E8EBEF"))
+    c.roundRect(x + 2, y - 3, w, h, 12, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setStrokeColor(colors.HexColor("#EDEFF2"))
+    c.setLineWidth(0.75)
+    c.roundRect(x, y, w, h, 12, stroke=1, fill=1)
+
+    cx = x + w / 2
+    # metric label
+    c.setFillColor(colors.HexColor(MUTED))
+    c.setFont("Helvetica", 10.5)
+    c.drawCentredString(cx, y + h - 24, label.upper())
+
+    # country badge + name
+    code = _ISO.get(country, (country[:2] or "?").upper())
+    badge_r = 11
+    name_w = stringWidth(country, "Helvetica-Bold", 15)
+    badge_cx = cx - (name_w / 2) - badge_r - 6
+    badge_cy = y + h - 52
+    c.setFillColor(colors.HexColor(REGION_COLORS.get(region, "#7F7F7F")))
+    c.circle(badge_cx, badge_cy, badge_r, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawCentredString(badge_cx, badge_cy - 3, code)
+    c.setFillColor(colors.HexColor(INK))
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(badge_cx + badge_r + 6, badge_cy - 5, country)
+
+    # big value with arrow — auto-fit so number + unit + arrow stay inside the card
+    inner = w - 30
+    arrow_w, arrow_gap, num_unit_gap = 13, 7, 3
+    num_size, unit_size = 42, 18
+    while True:
+        num_w = stringWidth(num_str, "Helvetica-Bold", num_size)
+        unit_w = stringWidth(unit_str, "Helvetica-Bold", unit_size)
+        group_w = arrow_w + arrow_gap + num_w + num_unit_gap + unit_w
+        if group_w <= inner or num_size <= 24:
+            break
+        num_size -= 1
+        unit_size = max(12, int(num_size * 0.44))
+
+    baseline = y + 24
+    ax = cx - group_w / 2
+    _draw_arrow(c, ax + arrow_w / 2, baseline + num_size * 0.72, up, value_color)
+    c.setFillColor(colors.HexColor(value_color))
+    c.setFont("Helvetica-Bold", num_size)
+    c.drawString(ax + arrow_w + arrow_gap, baseline, num_str)
+    c.setFont("Helvetica-Bold", unit_size)
+    c.drawString(ax + arrow_w + arrow_gap + num_w + num_unit_gap, baseline, unit_str)
+
+
+def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str) -> bytes:
+    from reportlab.pdfgen import canvas
+    buf = io.BytesIO()
+    W, H = PAGE_SIZE
+    c = canvas.Canvas(buf, pagesize=PAGE_SIZE)
+    mx = 40
+
+    # header
+    c.setFillColor(colors.HexColor(NAVY))
+    c.setFont("Helvetica-Bold", 30)
+    c.drawString(mx, H - 62, f"Executive Summary — Last {period}")
+    c.setFillColor(colors.HexColor(MUTED))
+    c.setFont("Helvetica", 13)
+    c.drawString(mx, H - 84, "Largest market movements across sovereign credit and equity markets.")
+
+    cds_col, eq_col = f"CDS {period}", f"Equity {period}"
+    cds = df[["Country", "Region", cds_col]].dropna()
+    eq = df[["Country", "Region", eq_col]].dropna()
+
+    cards = []
+    if not cds.empty:
+        w = cds.loc[cds[cds_col].idxmax()]
+        t = cds.loc[cds[cds_col].idxmin()]
+        cards.append(dict(label="Largest CDS Widening", country=w["Country"], region=w["Region"],
+                          num_str=f"{w[cds_col]:+.1f}", unit_str="bps", value_color=POS, up=True))
+        cards.append(dict(label="Largest CDS Tightening", country=t["Country"], region=t["Region"],
+                          num_str=f"{t[cds_col]:+.1f}", unit_str="bps", value_color=NEG, up=False))
+    if not eq.empty:
+        s = eq.loc[eq[eq_col].idxmax()]
+        k = eq.loc[eq[eq_col].idxmin()]
+        cards.append(dict(label="Strongest Equity Market", country=s["Country"], region=s["Region"],
+                          num_str=f"{s[eq_col]:+.1f}", unit_str="%", value_color=NEG, up=True))
+        cards.append(dict(label="Weakest Equity Market", country=k["Country"], region=k["Region"],
+                          num_str=f"{k[eq_col]:+.1f}", unit_str="%", value_color=POS, up=False))
+
+    # KPI row
+    n = len(cards)
+    if n:
+        gap = 18
+        card_w = (W - 2 * mx - (n - 1) * gap) / n
+        card_h = 150
+        row_top = H - 118
+        for i, cd in enumerate(cards):
+            _kpi_card(c, mx + i * (card_w + gap), row_top - card_h, card_w, card_h, **cd)
+
+    # separator
+    sep_y = H - 320
+    c.setStrokeColor(colors.HexColor(RULE))
+    c.setLineWidth(0.75)
+    c.line(mx, sep_y, W - mx, sep_y)
+
+    # key takeaways
+    c.setFillColor(colors.HexColor(NAVY))
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(mx, sep_y - 34, "Key Takeaways")
+    ty = sep_y - 66
+    for line in _exec_takeaways(df, period):
+        c.setFillColor(colors.HexColor(NAVY))
+        c.circle(mx + 4, ty + 5, 2.5, stroke=0, fill=1)
+        c.setFillColor(colors.HexColor(INK))
+        c.setFont("Helvetica", 15.5)
+        c.drawString(mx + 16, ty, line)
+        ty -= 30
+
+    # footer
+    c.setStrokeColor(colors.HexColor(RULE)); c.setLineWidth(0.5)
+    c.line(mx, 28, W - mx, 28)
+    c.setFont("Helvetica", 7.5); c.setFillColor(colors.HexColor(MUTED))
+    c.drawString(mx, 17, footer_note)
+    c.drawRightString(W - mx, 17, "1")
+
+    c.showPage(); c.save()
+    return buf.getvalue()
 
 
 def chart_heatmap(df: pd.DataFrame, metric: str, period: str, max_rows: int | None = None,
@@ -272,13 +425,6 @@ def _prepare_for_print(fig: go.Figure, width: int, height: int) -> go.Figure:
     """Copy a screen figure and restyle it for a fixed-size printed panel."""
     f = go.Figure(fig)
     is_heat = bool(f.data) and isinstance(f.data[0], go.Heatmap)
-    is_indicator = bool(f.data) and isinstance(f.data[0], go.Indicator)
-    if is_indicator:
-        f.update_layout(title=None, template="plotly_white", width=width, height=height,
-                        paper_bgcolor="white", plot_bgcolor="white",
-                        font=dict(family="Helvetica, Arial, sans-serif", color=INK),
-                        margin=dict(l=20, r=20, t=20, b=20))
-        return f
     f.update_layout(
         title=None,
         template="plotly_white",
@@ -317,7 +463,7 @@ def _footer(canvas, doc):
     canvas.setFont("Helvetica", 7.5)
     canvas.setFillColor(colors.HexColor(MUTED))
     canvas.drawString(MARGIN_X, 17, doc.footer_note)
-    canvas.drawRightString(page_w - MARGIN_X, 17, str(canvas.getPageNumber()))
+    canvas.drawRightString(page_w - MARGIN_X, 17, str(canvas.getPageNumber() + 1))
     canvas.restoreState()
 
 
@@ -347,7 +493,6 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
     panel_h = int((doc.height - TITLE_H - TITLE_GAP) * SHRINK)
 
     figures = [
-        chart_summary(df, period),
         chart_scatter(df, period, label_top=6),
         chart_ranked(df, "CDS", period, min(top_n, PDF_MAX_ROWS)),
         chart_ranked(df, "Equity", period, min(top_n, PDF_MAX_ROWS)),
@@ -370,7 +515,18 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
             story.append(PageBreak())
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
-    return buffer.getvalue()
+
+    # Prepend the natively-drawn executive summary page.
+    from pypdf import PdfReader, PdfWriter
+    exec_pdf = _exec_summary_pdf(df, period, doc.footer_note)
+    writer = PdfWriter()
+    for page in PdfReader(io.BytesIO(exec_pdf)).pages:
+        writer.add_page(page)
+    for page in PdfReader(io.BytesIO(buffer.getvalue())).pages:
+        writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
 
 
 # --- App --------------------------------------------------------------------
