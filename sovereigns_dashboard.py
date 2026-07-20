@@ -303,15 +303,18 @@ def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, 
     c.setLineWidth(0.75)
     c.roundRect(x, y, w, h, 9, stroke=1, fill=1)
 
-    # label (top), country (left) and value (right) share one compact band
+    cx = x + w / 2
+    # label (top, centered)
     c.setFillColor(colors.HexColor(MUTED))
     c.setFont("Helvetica", 7.5)
-    c.drawString(x + 12, y + h - 15, label.upper())
+    c.drawCentredString(cx, y + h - 15, label.upper())
 
+    # country badge + name (middle, centered as a group)
     code = _ISO.get(country, (country[:2] or "?").upper())
     badge_r = 7
-    badge_cx = x + 12 + badge_r
-    badge_cy = y + 16
+    name_w = stringWidth(country, "Helvetica-Bold", 10.5)
+    badge_cx = cx - (name_w / 2) - badge_r - 5
+    badge_cy = y + h - 33
     c.setFillColor(colors.HexColor(REGION_COLORS.get(region, "#7F7F7F")))
     c.circle(badge_cx, badge_cy, badge_r, stroke=0, fill=1)
     c.setFillColor(colors.white)
@@ -321,10 +324,10 @@ def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, 
     c.setFont("Helvetica-Bold", 10.5)
     c.drawString(badge_cx + badge_r + 5, badge_cy - 4, country)
 
-    # value on the right, auto-fit
-    inner = w - 24
+    # value with arrow (bottom, centered), auto-fit
+    inner = w - 20
     arrow_w, arrow_gap, num_unit_gap = 9, 5, 2
-    num_size, unit_size = 22, 11
+    num_size, unit_size = 21, 11
     while True:
         num_w = stringWidth(num_str, "Helvetica-Bold", num_size)
         unit_w = stringWidth(unit_str, "Helvetica-Bold", unit_size)
@@ -333,8 +336,8 @@ def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, 
             break
         num_size -= 1
         unit_size = max(9, int(num_size * 0.5))
-    baseline = badge_cy - 8
-    ax = x + w - 12 - group_w
+    baseline = y + 9
+    ax = cx - group_w / 2
     _draw_arrow(c, ax + arrow_w / 2, baseline + num_size * 0.7, up, value_color, w=9, h=11)
     c.setFillColor(colors.HexColor(value_color))
     c.setFont("Helvetica-Bold", num_size)
@@ -403,9 +406,9 @@ def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str,
         card_h1 = 122
         _draw_card_row(c, sel_cards, W, mx, primary_top, card_h1, period)
         mini_top = primary_top - card_h1 - 14
-        card_h2 = 62
+        card_h2 = 76
         _draw_card_row(c, _build_cards(df, "5 day"), W, mx, mini_top, card_h2, "5 day", mini=True)
-        sep_y = mini_top - card_h2 - 20
+        sep_y = mini_top - card_h2 - 18
     else:
         primary_top = H - 118
         card_h1 = 150
