@@ -240,7 +240,8 @@ def _draw_arrow(c, cx, top_y, up: bool, color: str, w: float = 15, h: float = 18
     c.drawPath(p, fill=1, stroke=0)
 
 
-def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value_color, up):
+def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value_color, up,
+              label_size=10.5):
     from reportlab.pdfbase.pdfmetrics import stringWidth
     # subtle shadow then white rounded card
     c.setFillColor(colors.HexColor("#E8EBEF"))
@@ -253,7 +254,7 @@ def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value
     cx = x + w / 2
     # metric label
     c.setFillColor(colors.HexColor(MUTED))
-    c.setFont("Helvetica", 10.5)
+    c.setFont("Helvetica", label_size)
     c.drawCentredString(cx, y + h - 24, label.upper())
 
     # country badge + name
@@ -294,7 +295,8 @@ def _kpi_card(c, x, y, w, h, *, label, country, region, num_str, unit_str, value
     c.drawString(ax + arrow_w + arrow_gap + num_w + num_unit_gap, baseline, unit_str)
 
 
-def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, value_color, up):
+def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, value_color, up,
+                   label_size=7.5):
     from reportlab.pdfbase.pdfmetrics import stringWidth
     c.setFillColor(colors.HexColor("#EAEDF1"))
     c.roundRect(x + 1.5, y - 2, w, h, 9, stroke=0, fill=1)
@@ -306,7 +308,7 @@ def _kpi_card_mini(c, x, y, w, h, *, label, country, region, num_str, unit_str, 
     cx = x + w / 2
     # label (top, centered)
     c.setFillColor(colors.HexColor(MUTED))
-    c.setFont("Helvetica", 7.5)
+    c.setFont("Helvetica", label_size)
     c.drawCentredString(cx, y + h - 15, label.upper())
 
     # country badge + name (middle, centered as a group)
@@ -369,16 +371,27 @@ def _build_cards(df: pd.DataFrame, per: str) -> list[dict]:
 
 
 def _draw_card_row(c, cards, W, mx, row_top, card_h, suffix, *, mini=False):
+    from reportlab.pdfbase.pdfmetrics import stringWidth
     n = len(cards)
     if not n:
         return
     gap = 18
     card_w = (W - 2 * mx - (n - 1) * gap) / n
     drawer = _kpi_card_mini if mini else _kpi_card
+
+    # Uniform label size that fits the longest label into a card (keeps the row aligned).
+    labels = [f"{cd['label']} · {suffix}".upper() for cd in cards]
+    base = 7.5 if mini else 10.5
+    floor = 6.0 if mini else 7.5
+    avail = card_w - 12
+    longest = max((stringWidth(t, "Helvetica", base) for t in labels), default=0)
+    label_size = base if longest <= avail else max(floor, base * avail / longest)
+
     for i, cd in enumerate(cards):
         cd2 = dict(cd)
-        cd2["label"] = f"{cd['label']}  ·  {suffix}"
-        drawer(c, mx + i * (card_w + gap), row_top - card_h, card_w, card_h, **cd2)
+        cd2["label"] = f"{cd['label']} · {suffix}"
+        drawer(c, mx + i * (card_w + gap), row_top - card_h, card_w, card_h,
+               label_size=label_size, **cd2)
 
 
 def _exec_summary_pdf(df: pd.DataFrame, period: str, footer_note: str,
