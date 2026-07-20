@@ -146,7 +146,7 @@ def chart_ranked(df: pd.DataFrame, metric: str, period: str, top_n: int) -> go.F
     return fig
 
 
-def chart_scatter(df: pd.DataFrame, period: str) -> go.Figure:
+def chart_scatter(df: pd.DataFrame, period: str, label_top: int = 0) -> go.Figure:
     x_col = f"CDS {period}"
     y_col = f"Equity {period}"
     plot_df = df.dropna(subset=[x_col, y_col, "CDS Now"]).copy()
@@ -164,7 +164,50 @@ def chart_scatter(df: pd.DataFrame, period: str) -> go.Figure:
     )
     fig.add_hline(y=0, line_width=1, line_dash="dot", line_color=MUTED)
     fig.add_vline(x=0, line_width=1, line_dash="dot", line_color=MUTED)
+    if label_top and not plot_df.empty:
+        # rank by normalized distance from the origin so both axes count equally
+        x_scale = plot_df[x_col].abs().max() or 1
+        y_scale = plot_df[y_col].abs().max() or 1
+        mag = ((plot_df[x_col] / x_scale) ** 2 + (plot_df[y_col] / y_scale) ** 2) ** 0.5
+        for _, r in plot_df.loc[mag.nlargest(label_top).index].iterrows():
+            fig.add_annotation(
+                x=r[x_col], y=r[y_col], text=r["Country"],
+                showarrow=False, yshift=13, font=dict(size=9.5, color=INK),
+            )
     fig.update_layout(height=520, legend_title_text="Region", margin=dict(l=10, r=10, t=60, b=10))
+    return fig
+
+
+def chart_summary(df: pd.DataFrame, period: str) -> go.Figure:
+    """Visualization-only executive summary: the week's headline movers."""
+    cds_col = f"CDS {period}"
+    eq_col = f"Equity {period}"
+    fig = go.Figure()
+    if df[cds_col].notna().any():
+        r = df.loc[df[cds_col].idxmax()]
+        fig.add_trace(go.Indicator(
+            mode="number",
+            value=float(r[cds_col]),
+            number={"suffix": " bps", "valueformat": "+.1f", "font": {"size": 60, "color": NAVY}},
+            title={"text": f"Largest CDS widening<br><span style='font-size:26px;color:{INK}'>{r['Country']}</span>",
+                   "font": {"size": 17, "color": MUTED}},
+            domain={"row": 0, "column": 0},
+        ))
+    if df[eq_col].notna().any():
+        r = df.loc[df[eq_col].idxmin()]
+        fig.add_trace(go.Indicator(
+            mode="number",
+            value=float(r[eq_col]),
+            number={"suffix": " %", "valueformat": "+.1f", "font": {"size": 60, "color": "#B23A2E"}},
+            title={"text": f"Weakest equity market<br><span style='font-size:26px;color:{INK}'>{r['Country']}</span>",
+                   "font": {"size": 17, "color": MUTED}},
+            domain={"row": 0, "column": 1},
+        ))
+    fig.update_layout(
+        grid={"rows": 1, "columns": 2, "pattern": "independent"},
+        title=f"Executive summary — {period}",
+        height=520,
+    )
     return fig
 
 
@@ -229,6 +272,13 @@ def _prepare_for_print(fig: go.Figure, width: int, height: int) -> go.Figure:
     """Copy a screen figure and restyle it for a fixed-size printed panel."""
     f = go.Figure(fig)
     is_heat = bool(f.data) and isinstance(f.data[0], go.Heatmap)
+    is_indicator = bool(f.data) and isinstance(f.data[0], go.Indicator)
+    if is_indicator:
+        f.update_layout(title=None, template="plotly_white", width=width, height=height,
+                        paper_bgcolor="white", plot_bgcolor="white",
+                        font=dict(family="Helvetica, Arial, sans-serif", color=INK),
+                        margin=dict(l=20, r=20, t=20, b=20))
+        return f
     f.update_layout(
         title=None,
         template="plotly_white",
@@ -291,12 +341,16 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
         spaceBefore=0, spaceAfter=0,
     )
 
-    panel_w = int(doc.width)
-    panel_h = int(doc.height - TITLE_H - TITLE_GAP)  # leaves exact room for the header
+    # Shrink the chart to well under the frame so the title always shares its page.
+    SHRINK = 0.86
+    panel_w = int(doc.width * SHRINK)
+    panel_h = int((doc.height - TITLE_H - TITLE_GAP) * SHRINK)
 
     figures = [
-        chart_scatter(df, period),
+        chart_summary(df, period),
+        chart_scatter(df, period, label_top=6),
         chart_ranked(df, "CDS", period, min(top_n, PDF_MAX_ROWS)),
+        chart_ranked(df, "Equity", period, min(top_n, PDF_MAX_ROWS)),
         chart_heatmap(df, "CDS", period, max_rows=PDF_MAX_ROWS),
         chart_heatmap(df, "Equity", period, max_rows=PDF_MAX_ROWS),
     ]
@@ -305,10 +359,12 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
     for i, fig in enumerate(figures):
         heading = (fig.layout.title.text or "").strip()
         png = _fig_to_png(fig, panel_w, panel_h)
+        img = RLImage(io.BytesIO(png), width=panel_w, height=panel_h)
+        img.hAlign = "CENTER"
         story.append(KeepTogether([
             Paragraph(heading, title_style),
             Spacer(1, TITLE_GAP),
-            RLImage(io.BytesIO(png), width=panel_w, height=panel_h),
+            img,
         ]))
         if i < len(figures) - 1:
             story.append(PageBreak())
