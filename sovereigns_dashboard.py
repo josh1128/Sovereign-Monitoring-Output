@@ -12,7 +12,7 @@ import streamlit as st
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
 from reportlab.platypus import Image as RLImage
 
 st.set_page_config(page_title="Sovereign Market Monitor", page_icon="🌐", layout="wide")
@@ -116,21 +116,6 @@ def load_monitor(file_bytes: bytes) -> pd.DataFrame:
     return df
 
 
-def risk_score(df: pd.DataFrame, period: str) -> pd.Series:
-    components = []
-    for metric in ("CDS", "Equity", "FX"):
-        col = METRIC_INFO[metric]["columns"][period]
-        values = df[col]
-        if values.notna().sum() < 2:
-            continue
-        ranks = values.rank(pct=True, method="average")
-        risk = ranks if METRIC_INFO[metric]["positive_is_risk"] else 1 - ranks
-        components.append(risk.rename(metric))
-    if not components:
-        return pd.Series(np.nan, index=df.index)
-    return pd.concat(components, axis=1).mean(axis=1, skipna=True) * 100
-
-
 def fmt(value: float, unit: str = "", decimals: int = 1) -> str:
     if pd.isna(value):
         return "N/A"
@@ -161,26 +146,6 @@ def chart_ranked(df: pd.DataFrame, metric: str, period: str, top_n: int) -> go.F
     return fig
 
 
-def chart_risk(df: pd.DataFrame, period: str, top_n: int) -> go.Figure:
-    plot_df = df.assign(**{"Risk Score": risk_score(df, period)}).dropna(subset=["Risk Score"])
-    plot_df = plot_df.nlargest(top_n, "Risk Score").sort_values("Risk Score")
-    fig = px.bar(
-        plot_df,
-        x="Risk Score",
-        y="Country",
-        color="Region",
-        color_discrete_map=REGION_COLORS,
-        orientation="h",
-        range_x=[0, 100],
-        labels={"Risk Score": "Composite risk score (0 = calmest, 100 = most stressed)", "Country": ""},
-        title=f"Composite market-risk ranking — {period}",
-        hover_data={"Region": True, "Risk Score": ":.0f"},
-    )
-    fig.add_vline(x=50, line_width=1, line_dash="dot", line_color=MUTED)
-    fig.update_layout(height=max(430, 31 * len(plot_df)), legend_title_text="Region", margin=dict(l=10, r=10, t=60, b=10))
-    return fig
-
-
 def chart_scatter(df: pd.DataFrame, period: str) -> go.Figure:
     x_col = f"CDS {period}"
     y_col = f"Equity {period}"
@@ -205,22 +170,12 @@ def chart_scatter(df: pd.DataFrame, period: str) -> go.Figure:
 
 def chart_heatmap(df: pd.DataFrame, metric: str, period: str, max_rows: int | None = None,
                   annotate: bool | None = None) -> go.Figure:
-    if metric == "Risk Score":
-        heat = (
-            df.assign(**{"Risk Score": risk_score(df, period)})[["Country", "Risk Score"]]
-            .dropna()
-            .set_index("Country")
-            .sort_values("Risk Score", ascending=False)
-        )
-        zmid = 50
-        title = f"Composite risk score — {period}"
-    else:
-        columns = [METRIC_INFO[metric]["columns"][p] for p in PERIODS]
-        heat = df.set_index("Country")[columns]
-        heat.columns = PERIODS
-        heat = heat.loc[heat.abs().max(axis=1).sort_values(ascending=False).index]
-        zmid = 0
-        title = f"{metric} changes across periods ({METRIC_INFO[metric]['unit']})"
+    columns = [METRIC_INFO[metric]["columns"][p] for p in PERIODS]
+    heat = df.set_index("Country")[columns]
+    heat.columns = PERIODS
+    heat = heat.loc[heat.abs().max(axis=1).sort_values(ascending=False).index]
+    zmid = 0
+    title = f"{metric} changes across periods ({METRIC_INFO[metric]['unit']})"
 
     if max_rows is not None:
         heat = heat.head(max_rows)
@@ -260,12 +215,6 @@ def generate_summary(df: pd.DataFrame, period: str) -> list[str]:
             statements.append(
                 f"{worst['Country']} showed the largest {label} at {fmt(worst[col], METRIC_INFO[metric]['unit'])}; {best['Country']} moved most in the opposite direction at {fmt(best[col], METRIC_INFO[metric]['unit'])}."
             )
-
-    ranked = df.assign(**{"Risk Score": risk_score(df, period)}).dropna(subset=["Risk Score"])
-    if not ranked.empty:
-        top = ranked.nlargest(3, "Risk Score")
-        names = ", ".join(f"{r.Country} ({r['Risk Score']:.0f})" for _, r in top.iterrows())
-        statements.append(f"The highest composite market-risk scores were {names}.")
     return statements
 
 
@@ -273,6 +222,7 @@ def generate_summary(df: pd.DataFrame, period: str) -> list[str]:
 PAGE_SIZE = landscape(letter)
 MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 32, 30, 40
 PDF_MAX_ROWS = 26  # keep one chart legible on a single landscape page
+TITLE_H, TITLE_GAP = 15, 8
 
 
 def _prepare_for_print(fig: go.Figure, width: int, height: int) -> go.Figure:
@@ -337,31 +287,29 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         name="ChartTitle", parent=styles["BodyText"], fontName="Helvetica-Bold",
-        fontSize=13, leading=15, textColor=colors.HexColor(NAVY), spaceAfter=0,
+        fontSize=13, leading=TITLE_H, textColor=colors.HexColor(NAVY),
+        spaceBefore=0, spaceAfter=0,
     )
 
-    header_h = 15 + 8  # title line + breathing room
     panel_w = int(doc.width)
-    panel_h = int(doc.height - header_h)
+    panel_h = int(doc.height - TITLE_H - TITLE_GAP)  # leaves exact room for the header
 
     figures = [
-        chart_risk(df, period, min(top_n, PDF_MAX_ROWS)),
         chart_scatter(df, period),
         chart_ranked(df, "CDS", period, min(top_n, PDF_MAX_ROWS)),
-        chart_ranked(df, "Equity", period, min(top_n, PDF_MAX_ROWS)),
-        chart_ranked(df, "FX", period, min(top_n, PDF_MAX_ROWS)),
         chart_heatmap(df, "CDS", period, max_rows=PDF_MAX_ROWS),
         chart_heatmap(df, "Equity", period, max_rows=PDF_MAX_ROWS),
-        chart_heatmap(df, "FX", period, max_rows=PDF_MAX_ROWS),
     ]
 
     story = []
     for i, fig in enumerate(figures):
         heading = (fig.layout.title.text or "").strip()
         png = _fig_to_png(fig, panel_w, panel_h)
-        story.append(Paragraph(heading, title_style))
-        story.append(Spacer(1, 8))
-        story.append(RLImage(io.BytesIO(png), width=panel_w, height=panel_h))
+        story.append(KeepTogether([
+            Paragraph(heading, title_style),
+            Spacer(1, TITLE_GAP),
+            RLImage(io.BytesIO(png), width=panel_w, height=panel_h),
+        ]))
         if i < len(figures) - 1:
             story.append(PageBreak())
 
@@ -395,19 +343,15 @@ if filtered.empty:
     st.warning("No countries match the selected filters.")
     st.stop()
 
-filtered["Risk Score"] = risk_score(filtered, period)
-
 cds_col, eq_col, fx_col = f"CDS {period}", f"Equity {period}", f"FX {period}"
 worst_cds = filtered.loc[filtered[cds_col].idxmax()] if filtered[cds_col].notna().any() else None
 worst_eq = filtered.loc[filtered[eq_col].idxmin()] if filtered[eq_col].notna().any() else None
 worst_fx = filtered.loc[filtered[fx_col].idxmax()] if filtered[fx_col].notna().any() else None
-worst_risk = filtered.loc[filtered["Risk Score"].idxmax()] if filtered["Risk Score"].notna().any() else None
 
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3 = st.columns(3)
 k1.metric("Countries monitored", len(filtered))
 k2.metric("Largest CDS widening", worst_cds["Country"] if worst_cds is not None else "N/A", fmt(worst_cds[cds_col], "bps") if worst_cds is not None else None)
 k3.metric("Weakest equity market", worst_eq["Country"] if worst_eq is not None else "N/A", fmt(worst_eq[eq_col], "%") if worst_eq is not None else None, delta_color="inverse")
-k4.metric("Highest risk score", worst_risk["Country"] if worst_risk is not None else "N/A", f"{worst_risk['Risk Score']:.0f}/100" if worst_risk is not None else None)
 
 summary_tab, charts_tab, heatmap_tab, data_tab, report_tab = st.tabs(["Overview", "Ranked charts", "Heatmap", "Data explorer", "Report"])
 
@@ -415,7 +359,6 @@ with summary_tab:
     st.subheader(f"Executive summary — {period}")
     for statement in generate_summary(filtered, period):
         st.markdown(f"- {statement}")
-    st.info("Composite risk score combines percentile ranks for CDS widening, negative equity returns, and local-currency depreciation. It is relative to the countries currently selected.")
     st.plotly_chart(chart_scatter(filtered, period), use_container_width=True)
 
 with charts_tab:
@@ -424,16 +367,16 @@ with charts_tab:
     st.plotly_chart(chart_ranked(filtered, metric, period, top_n), use_container_width=True)
 
 with heatmap_tab:
-    heat_metric = st.selectbox("Heatmap metric", ["CDS", "Equity", "FX", "Risk Score"])
+    heat_metric = st.selectbox("Heatmap metric", ["CDS", "Equity", "FX"])
     st.plotly_chart(chart_heatmap(filtered, heat_metric, period), use_container_width=True)
 
 with data_tab:
-    display_cols = ["Country", "Region", "Rating", "CDS Now", cds_col, eq_col, fx_col, "Risk Score"]
-    table = filtered[display_cols].sort_values("Risk Score", ascending=False)
+    display_cols = ["Country", "Region", "Rating", "CDS Now", cds_col, eq_col, fx_col]
+    table = filtered[display_cols].sort_values(cds_col, ascending=False)
     st.dataframe(
         table.style.format({
-            "CDS Now": "{:.1f}", cds_col: "{:+.1f}", eq_col: "{:+.1f}%", fx_col: "{:+.1f}%", "Risk Score": "{:.0f}",
-        }, na_rep="—").background_gradient(subset=["Risk Score"], cmap="RdYlGn_r"),
+            "CDS Now": "{:.1f}", cds_col: "{:+.1f}", eq_col: "{:+.1f}%", fx_col: "{:+.1f}%",
+        }, na_rep="—"),
         use_container_width=True,
         hide_index=True,
     )
@@ -465,8 +408,7 @@ with report_tab:
         st.markdown("""
         **CDS:** Higher spreads or positive spread changes normally signal increased perceived sovereign credit risk.  
         **Equity:** Negative returns indicate weaker domestic market sentiment.  
-        **FX:** For USD/local-currency quotations, a positive change generally indicates local-currency depreciation.  
-        **Composite score:** The average risk percentile across available CDS, equity, and FX measures. Scores depend on the selected peer group and period.
+        **FX:** For USD/local-currency quotations, a positive change generally indicates local-currency depreciation.
         """)
 
 st.caption("Data are read from the cached values saved in the Excel workbook. Refresh the workbook through its market-data plug-ins before uploading it to update the dashboard.")
