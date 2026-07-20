@@ -95,7 +95,7 @@ def load_monitor(file_bytes: bytes) -> pd.DataFrame:
     for _, row in raw.iterrows():
         first = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
         if first in REGION_NAMES:
-            current_region = first
+            current_region = REGION_ALIASES[first]
             continue
         if not first or first in {"Country", "Threshold  (Green)", "Threshold Red", "Sovereign Market Monitoring Model"}:
             continue
