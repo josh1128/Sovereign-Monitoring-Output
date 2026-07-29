@@ -552,10 +552,30 @@ PDF_MAX_ROWS = 26  # keep one chart legible on a single landscape page
 TITLE_H, TITLE_GAP = 15, 8
 
 
-def _prepare_for_print(fig: go.Figure, width: int, height: int) -> go.Figure:
-    """Copy a screen figure and restyle it for a fixed-size printed panel."""
+def _prepare_for_print(fig: go.Figure, width: int, height: int,
+                       note: str | None = None) -> go.Figure:
+    """Copy a screen figure and restyle it for a fixed-size printed panel.
+
+    If `note` is given, it is wrapped and stamped into the bottom margin so it
+    becomes part of the rendered PNG (and therefore the PDF chart page).
+    """
+    import textwrap
+
     f = go.Figure(fig)
     is_heat = bool(f.data) and isinstance(f.data[0], go.Heatmap)
+    bottom = 34
+
+    note = (note or "").strip()
+    note_lines: list[str] = []
+    if note:
+        # Wrap to the panel width (~5.5 px per character at 9.5pt).
+        wrap_at = max(40, int(width / 5.5))
+        for para in note.splitlines():
+            para = para.strip()
+            note_lines.extend(textwrap.wrap(para, width=wrap_at) if para else [""])
+        # Room for the note plus a little padding above it.
+        bottom += 14 + 14 * len(note_lines)
+
     f.update_layout(
         title=None,
         template="plotly_white",
@@ -569,18 +589,31 @@ def _prepare_for_print(fig: go.Figure, width: int, height: int) -> go.Figure:
             orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1.0,
             title_text="", font=dict(size=9.5), bgcolor="rgba(0,0,0,0)",
         ),
-        margin=dict(l=8, r=76 if is_heat else 8, t=10 if is_heat else 30, b=34),
+        margin=dict(l=8, r=76 if is_heat else 8, t=10 if is_heat else 30, b=bottom),
         coloraxis_colorbar=dict(thickness=10, len=0.65, outlinewidth=0, tickfont=dict(size=9)),
     )
     f.update_xaxes(automargin=True, gridcolor=GRID, zeroline=False, linecolor=RULE,
                    ticks="outside", tickcolor=RULE, ticklen=4, title_font=dict(size=10))
     f.update_yaxes(automargin=True, gridcolor=GRID, zeroline=False, linecolor=RULE,
                    title_font=dict(size=10))
+
+    if note_lines:
+        # Anchor to the very bottom of the panel in pixel space so the note sits
+        # inside the enlarged bottom margin, clear of the axis.
+        f.add_annotation(
+            text="<br>".join(note_lines),
+            xref="paper", yref="paper", x=0, y=0,
+            xanchor="left", yanchor="top",
+            yshift=-(bottom - 14 - 14 * len(note_lines)) - 8,
+            showarrow=False, align="left",
+            font=dict(family="Helvetica, Arial, sans-serif", size=9, color=MUTED),
+        )
     return f
 
 
-def _fig_to_png(fig: go.Figure, width: int, height: int, scale: int = 2) -> bytes:
-    return _prepare_for_print(fig, width, height).to_image(
+def _fig_to_png(fig: go.Figure, width: int, height: int, scale: int = 2,
+                note: str | None = None) -> bytes:
+    return _prepare_for_print(fig, width, height, note=note).to_image(
         format="png", width=width, height=height, scale=scale
     )
 
@@ -599,7 +632,8 @@ def _footer(canvas, doc):
 
 
 def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top_n: int,
-             custom_takeaways: list[str] | None = None) -> bytes:
+             custom_takeaways: list[str] | None = None,
+             custom_note: str | None = None) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -642,7 +676,7 @@ def make_pdf(df: pd.DataFrame, period: str, selected_regions: Iterable[str], top
     story = []
     for i, fig in enumerate(figures):
         heading = (fig.layout.title.text or "").strip()
-        png = _fig_to_png(fig, panel_w, panel_h)
+        png = _fig_to_png(fig, panel_w, panel_h, note=custom_note)
         img = RLImage(io.BytesIO(png), width=panel_w, height=panel_h)
         img.hAlign = "CENTER"
         story.append(KeepTogether([
@@ -754,11 +788,22 @@ with report_tab:
         custom_takeaways = [ln.strip() for ln in raw.splitlines() if ln.strip()]
         st.caption(f"{len(custom_takeaways)} takeaway(s) will be used.")
 
+    custom_note = st.text_area(
+        "Notes (printed at the bottom of every chart)",
+        value="",
+        height=90,
+        help="Your own footnote — appears baked into each chart image in the PDF. "
+             "Leave blank for no note. Long lines wrap automatically.",
+    ).strip()
+    if custom_note:
+        st.caption("This note will appear at the bottom of every chart page.")
+
     if st.button("Build PDF", type="primary"):
         with st.spinner("Rendering charts…"):
             try:
                 st.session_state["pdf_bytes"] = make_pdf(
-                    filtered, period, selected_regions, top_n, custom_takeaways=custom_takeaways
+                    filtered, period, selected_regions, top_n,
+                    custom_takeaways=custom_takeaways, custom_note=custom_note or None,
                 )
             except Exception as exc:
                 st.session_state.pop("pdf_bytes", None)
