@@ -80,7 +80,7 @@ st.markdown("""
     .metric-value { color:#f0f4ff; font-size:26px; font-weight:700; }
     .metric-sub { color:#6c8ebf; font-size:12px; margin-top:2px; }
     section[data-testid="stSidebar"] { background:#12151f; }
-    .chart-note { color:#8b93a7; font-size:12px; line-height:1.5; margin-top:-6px; }
+    .chart-note { color:#555; font-size:12px; line-height:1.5; margin-top:6px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -361,13 +361,70 @@ def figure_with_note(fig, note, on_white=False):
 
     return out
 
+def figure_for_screen(fig, note=None):
+    """Return a clean white-background chart for the Streamlit page.
+
+    Notes are placed inside the Plotly figure in a dedicated footer so browser
+    screenshots / Plotly camera exports do not place the note over the graph.
+    """
+    import copy
+    import textwrap
+
+    out = copy.deepcopy(fig)
+    INK = "#222222"
+    MUTED = "#555555"
+    GRID = "#e6e6e6"
+
+    is_geo = bool(out.data) and out.data[0].type in ("choropleth", "scattergeo")
+    if not is_geo:
+        out.update_layout(template="plotly_white")
+
+    out.update_layout(
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(family="Arial", size=14, color=INK),
+    )
+
+    if not is_geo:
+        out.update_xaxes(gridcolor=GRID, tickfont=dict(size=12, color=INK),
+                         title_font=dict(size=14, color=INK), automargin=True)
+        out.update_yaxes(gridcolor=GRID, tickfont=dict(size=12, color=INK),
+                         title_font=dict(size=14, color=INK), automargin=True)
+
+    for ann in out.layout.annotations:
+        if ann.font is None:
+            ann.font = dict()
+        ann.font.color = INK
+
+    note = (note or "").strip()
+    if note:
+        lines = textwrap.wrap(note, width=130, break_long_words=False, break_on_hyphens=False)
+        old = out.layout.margin
+        is_pie = bool(out.data) and out.data[0].type == "pie"
+        bottom = max(old.b or 0, 145 if is_pie else 135)
+        right = max(old.r or 0, 185 if is_pie else 40)
+        out.update_layout(margin=dict(l=max(old.l or 0, 50), r=right,
+                                      t=max(old.t or 0, 45), b=bottom))
+        out.add_shape(type="line", xref="paper", yref="paper",
+                      x0=0, x1=1, y0=-0.105, y1=-0.105,
+                      line=dict(color="#d0d0d0", width=1))
+        out.add_annotation(
+            text="<b>Note:</b> " + "<br>".join(lines),
+            xref="paper", yref="paper", x=0, y=-0.135,
+            xanchor="left", yanchor="top", showarrow=False, align="left",
+            font=dict(family="Arial", size=12, color=MUTED),
+        )
+
+    return out
+
+
 def show_chart(fig, filename, key, note=None):
     """Display a Plotly chart with an optional note and HTML/PNG export."""
-    st.plotly_chart(fig, use_container_width=True,
-                    config={"responsive": True, "displaylogo": False},
+    display_fig = figure_for_screen(fig, note)
+    st.plotly_chart(display_fig, use_container_width=True,
+                    config={"responsive": True, "displaylogo": False,
+                            "toImageButtonOptions": {"format": "png", "scale": 2}},
                     key=f"chart_{key}")
-    if note:
-        st.markdown(f"<div class='chart-note'>{note}</div>", unsafe_allow_html=True)
 
     if st.checkbox("Prepare download", key=f"prepare_{key}",
                    help="Enable this only when you want to export this chart as a file."):
@@ -410,11 +467,11 @@ def show_chart(fig, filename, key, note=None):
 
 
 def dark(fig, height, **kw):
-    """Shared dark-theme layout."""
-    fig.update_layout(template='plotly_dark', height=height,
+    """Shared presentation layout (white background for Word/screenshots)."""
+    fig.update_layout(template='plotly_white', height=height,
                       margin=dict(l=60, r=30, t=30, b=50),
-                      hovermode='x unified', paper_bgcolor='rgba(0,0,0,0)',
-                      plot_bgcolor='rgba(0,0,0,0)', **kw)
+                      hovermode='x unified', paper_bgcolor='white',
+                      plot_bgcolor='white', font=dict(color='#222222'), **kw)
     return fig
 
 
@@ -485,15 +542,26 @@ with tab_a:
         v = df_creditors.loc[pie_year, c]
         if pd.notna(v) and v > 0:
             labels.append(c); vals.append(v); cols.append(CREDITOR_COLORS[c])
+    # Keep labels only on meaningful slices. Tiny slices remain visible in the
+    # legend/hover instead of piling labels on top of one another.
+    total_vals = sum(vals)
+    pct_vals = [(v / total_vals * 100) if total_vals else 0 for v in vals]
+    pie_text = [f"{lab}<br>{pct:.1f}%" if pct >= 2.0 else ""
+                for lab, pct in zip(labels, pct_vals)]
+
     fig1 = go.Figure(go.Pie(
         labels=labels, values=vals, marker_colors=cols, sort=False,
-        textinfo='label+percent', textposition='auto',
-        insidetextfont=dict(size=12), hole=0,
+        text=pie_text, textinfo='text', textposition='inside',
+        insidetextfont=dict(size=13, color='white'),
         hovertemplate='<b>%{label}</b><br>$%{value:,.0f}M<br>%{percent}<extra></extra>'))
-    fig1.update_layout(template='plotly_dark', height=520, showlegend=True,
-                       legend=dict(orientation='v', x=1.02, y=0.5, font=dict(size=11)),
-                       margin=dict(l=20, r=20, t=20, b=20),
-                       paper_bgcolor='rgba(0,0,0,0)')
+    fig1.update_layout(
+        template='plotly_white', height=620, showlegend=True,
+        legend=dict(orientation='v', x=1.02, xanchor='left', y=0.5, yanchor='middle',
+                    font=dict(size=12, color='#222222')),
+        margin=dict(l=35, r=210, t=35, b=35),
+        paper_bgcolor='white', plot_bgcolor='white',
+        font=dict(family='Arial', color='#222222')
+    )
     show_chart(fig1, f"chart1_share_by_creditor_{pie_year}.html", "c1",
                note="LC is local currency and FC is foreign currency. IADB is Inter-American "
                     "Development Bank. Other official creditors are bilateral and multilateral "
