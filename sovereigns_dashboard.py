@@ -164,10 +164,20 @@ def load_data():
 
 
 @st.cache_data(show_spinner=False)
-def plotly_png_bytes(fig_json, scale=2, width=1600, height=900):
-    """Render a Plotly figure to static PNG bytes (requires kaleido)."""
-    return pio.from_json(fig_json).to_image(format="png", scale=scale,
-                                            width=width, height=height)
+def plotly_png_bytes(fig_json, scale=2, width=1800, height=1100):
+    """Render a high-resolution, Word-ready Plotly figure to PNG bytes.
+
+    The wider canvas and extra height keep axis labels, legends, and footnotes
+    readable after the image is pasted and resized in Microsoft Word.
+    Requires kaleido.
+    """
+    fig = pio.from_json(fig_json)
+    return fig.to_image(
+        format="png",
+        scale=scale,
+        width=width,
+        height=height,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -183,44 +193,173 @@ def plotly_html_bytes(fig_json):
 
 
 def figure_with_note(fig, note, on_white=False):
-    """Return a copy of `fig` with the note stamped in a band at the very bottom.
+    """Create a Word-ready copy of a Plotly figure.
 
-    The on-screen note is rendered by Streamlit and would be lost in downloads,
-    so it is baked into the exported figure. It is always placed below the plot
-    and below any bottom legend, left-aligned, in a dark and legible colour.
+    Export changes only:
+    - white background with dark text
+    - larger title, axis, tick, and legend fonts
+    - extra spacing around axes and legends
+    - horizontal legends placed below the x-axis
+    - notes baked into a dedicated footer at the very bottom
+    - enough bottom margin so the legend and note never overlap
+
+    The on-screen Streamlit chart is left unchanged.
     """
     import copy
     import textwrap
 
     out = copy.deepcopy(fig)
-    note = (note or "").strip()
-    if not note:
-        return out
 
-    lines = textwrap.wrap(note, width=120) or [note]
-    line_px = 17
+    is_geo = bool(out.data) and out.data[0].type in ("choropleth", "scattergeo")
 
-    # Reserve room below a horizontal legend if one already sits under the plot.
-    leg = out.layout.legend
-    bottom_legend = bool(leg is not None and leg.orientation == 'h'
-                         and leg.y is not None and leg.y <= 0.05)
-    legend_px = 48 if bottom_legend else 0
-    gap = 22  # clear the axis / legend before the note starts
+    # Word / print-friendly styling
+    INK = "#222222"
+    MUTED = "#555555"
+    GRID = "#e4e4e4"
+    AXIS_LINE = "#b8b8b8"
 
-    base_b = out.layout.margin.b if out.layout.margin.b is not None else 50
+    # Use a clean white export surface so light text never disappears in Word.
+    if not is_geo:
+        out.update_layout(template="plotly_white")
+
     out.update_layout(
-        margin=dict(b=base_b + legend_px + gap + line_px * len(lines) + 14))
-
-    out.add_annotation(
-        text="<br>".join(lines),
-        xref='paper', yref='paper', x=0.0, y=0.0,
-        xanchor='left', yanchor='top',
-        yshift=-(base_b + legend_px + gap),
-        showarrow=False, align='left',
-        font=dict(family='Arial', size=12.5, color='#2b2b2b'),
+        autosize=False,
+        width=1800,
+        height=1100,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(family="Arial", size=16, color=INK),
+        title=dict(font=dict(family="Arial", size=21, color=INK)),
+        hovermode=False,
     )
-    return out
 
+    # Make all Cartesian labels comfortably readable after Word scales the image.
+    if not is_geo:
+        out.update_xaxes(
+            gridcolor=GRID,
+            zerolinecolor=GRID,
+            linecolor=AXIS_LINE,
+            tickcolor=AXIS_LINE,
+            tickfont=dict(family="Arial", size=14, color=INK),
+            title_font=dict(family="Arial", size=16, color=INK),
+            automargin=True,
+        )
+        out.update_yaxes(
+            gridcolor=GRID,
+            zerolinecolor=GRID,
+            linecolor=AXIS_LINE,
+            tickcolor=AXIS_LINE,
+            tickfont=dict(family="Arial", size=14, color=INK),
+            title_font=dict(family="Arial", size=16, color=INK),
+            automargin=True,
+        )
+
+    # Pie labels can otherwise inherit light text from the dark on-screen theme.
+    out.update_traces(
+        outsidetextfont=dict(family="Arial", size=14, color=INK),
+        selector=dict(type="pie"),
+    )
+
+    # Subplot titles and other annotations should also export in dark text.
+    for ann in out.layout.annotations:
+        if ann.font is None:
+            ann.font = dict()
+        ann.font.color = INK
+        if ann.font.size is None:
+            ann.font.size = 15
+
+    # ---------- Legend placement ----------
+    # The dashboard uses horizontal legends beneath many charts. Give these a
+    # dedicated row so they never collide with the note/footer.
+    leg = out.layout.legend
+    horizontal_legend = bool(leg is not None and leg.orientation == "h")
+
+    if horizontal_legend:
+        out.update_layout(
+            legend=dict(
+                orientation="h",
+                x=0.5,
+                xanchor="center",
+                y=-0.13,
+                yanchor="top",
+                font=dict(family="Arial", size=13, color=INK),
+                bgcolor="rgba(255,255,255,0)",
+                title_font=dict(family="Arial", size=13, color=INK),
+            )
+        )
+    else:
+        # Keep vertical legends at the side, but enlarge the type.
+        out.update_layout(
+            legend=dict(
+                font=dict(family="Arial", size=13, color=INK),
+                title_font=dict(family="Arial", size=13, color=INK),
+            )
+        )
+
+    # ---------- Note / footer ----------
+    note = (note or "").strip()
+
+    # Wrap long notes so they remain readable instead of becoming one tiny line.
+    note_lines = textwrap.wrap(
+        note,
+        width=145,
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) if note else []
+
+    # Bottom margin is deliberately generous. This is the key Word-export fix:
+    # x-axis -> legend row -> note row, each with its own space.
+    if note_lines and horizontal_legend:
+        bottom_margin = 245 + (len(note_lines) - 1) * 24
+        note_y = -0.255
+    elif note_lines:
+        bottom_margin = 185 + (len(note_lines) - 1) * 24
+        note_y = -0.165
+    elif horizontal_legend:
+        bottom_margin = 150
+        note_y = None
+    else:
+        bottom_margin = 90
+        note_y = None
+
+    # Preserve generous left/right/top margins where already specified.
+    old_margin = out.layout.margin
+    left = max(old_margin.l or 0, 90)
+    right = max(old_margin.r or 0, 70)
+    top = max(old_margin.t or 0, 70)
+
+    out.update_layout(
+        margin=dict(l=left, r=right, t=top, b=bottom_margin)
+    )
+
+    if note_lines:
+        # A subtle rule separates the chart from the explanatory note.
+        rule_y = note_y + 0.055
+        out.add_shape(
+            type="line",
+            xref="paper",
+            yref="paper",
+            x0=0,
+            x1=1,
+            y0=rule_y,
+            y1=rule_y,
+            line=dict(color="#c9c9c9", width=1),
+        )
+
+        out.add_annotation(
+            text="<b>Note:</b> " + "<br>".join(note_lines),
+            xref="paper",
+            yref="paper",
+            x=0,
+            y=note_y,
+            xanchor="left",
+            yanchor="top",
+            showarrow=False,
+            align="left",
+            font=dict(family="Arial", size=13, color=MUTED),
+        )
+
+    return out
 
 def show_chart(fig, filename, key, note=None):
     """Display a Plotly chart with an optional note and HTML/PNG export."""
@@ -234,13 +373,13 @@ def show_chart(fig, filename, key, note=None):
                    help="Enable this only when you want to export this chart as a file."):
         col_fmt, col_scale = st.columns([1, 1])
         with col_fmt:
-            fmt = st.radio("Format", ["HTML (interactive)", "PNG (image)"],
+            fmt = st.radio("Format", ["HTML (interactive)", "PNG (Word-ready image)"],
                            key=f"fmt_{key}", horizontal=True)
         base_name = filename.rsplit(".", 1)[0]
         on_white = str(fig.layout.paper_bgcolor or '').lower() in ('white', '#fff', '#ffffff')
         export_fig = figure_with_note(fig, note, on_white=on_white)
         if note:
-            st.caption("The note below the chart is included in the downloaded file.")
+            st.caption("The downloaded image uses larger fonts and includes the note in a dedicated footer for Microsoft Word.")
         if fmt.startswith("HTML"):
             st.download_button("⬇️ Download interactive HTML",
                                data=plotly_html_bytes(export_fig.to_json()),
@@ -257,7 +396,7 @@ def show_chart(fig, filename, key, note=None):
                                    data=plotly_png_bytes(export_fig.to_json(), scale=scale),
                                    file_name=f"{base_name}.png", mime="image/png",
                                    key=f"download_png_{key}",
-                                   help="Static image export of the chart, including its note.")
+                                   help="High-resolution white-background image sized for Microsoft Word, including its note.")
             except Exception as e:
                 if "topojson" in str(e).lower():
                     st.error("The map needs to fetch its base geometry (topojson) from "
