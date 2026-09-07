@@ -2,8 +2,8 @@ streamlit>=1.40
 pandas>=2.2
 numpy>=1.26
 openpyxl>=3.1
-plotly>=6.1.1
+plotly==6.1.1
 reportlab>=4.2
 matplotlib
-kaleido>=1.0.0
+kaleido==1.0.0
 pypdf
